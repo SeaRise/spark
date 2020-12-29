@@ -17,10 +17,11 @@
 
 package org.apache.spark.sql.hive.execution
 
+import java.io.IOException
 import java.util.Locale
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.Path
+import org.apache.hadoop.fs.{FileSystem, Path, Trash}
 import org.apache.hadoop.hive.ql.ErrorMsg
 import org.apache.hadoop.hive.ql.plan.TableDesc
 
@@ -243,7 +244,7 @@ case class InsertIntoHiveTable(
 
             val fs = partitionPath.getFileSystem(hadoopConf)
             if (fs.exists(partitionPath)) {
-              if (!fs.delete(partitionPath, true)) {
+              if (!moveToTrash(fs, partitionPath, hadoopConf)) {
                 throw new RuntimeException(
                   s"Cannot remove partition directory '$partitionPath'")
               }
@@ -309,7 +310,7 @@ case class InsertIntoHiveTable(
             partitionPath.foreach { path =>
               val fs = path.getFileSystem(hadoopConf)
               if (fs.exists(path)) {
-                if (!fs.delete(path, true)) {
+                if (!moveToTrash(fs, path, hadoopConf)) {
                   throw new RuntimeException(
                     s"Cannot remove partition directory '$path'")
                 }
@@ -340,5 +341,26 @@ case class InsertIntoHiveTable(
         overwrite,
         isSrcLocal = false)
     }
+  }
+
+  private def moveToTrash(fs: FileSystem, path: Path, conf: Configuration): Boolean = {
+    logDebug(s"deleting  $path")
+    try {
+      if (Trash.moveToAppropriateTrash(fs, path, conf)) {
+        logTrace(s"Moved to trash: $path")
+        return true
+      }
+    } catch { case ioe: IOException =>
+        // for whatever failure reason including that trash has lower encryption zone
+        // retry with force delete
+        logWarning(s"${ioe.getMessage }; Force to delete it.")
+    }
+
+    if (!fs.delete(path, true)) {
+      logError(s"Failed to delete $path")
+      return false
+    }
+
+    true
   }
 }
